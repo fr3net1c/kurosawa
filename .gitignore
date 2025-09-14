@@ -1,0 +1,9 @@
+# Environment variables
+.env
+
+# Database file
+*.db
+
+# OS-specific files
+.DS_Store
+Thumbs.db
