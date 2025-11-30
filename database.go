@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 	"time"
 
@@ -49,9 +48,36 @@ func (s *DBService) createTables() error {
 	if _, err := s.db.Exec(alterQuery); err != nil {
 		// It's safe to ignore the "duplicate column name" error.
 		if strings.Contains(err.Error(), "duplicate column name") {
-			return nil
+			// Continue anyway
+		} else {
+			return err
 		}
+	}
+
+	// Create user preferences table
+	userPrefsQuery := `
+	CREATE TABLE IF NOT EXISTS user_preferences (
+		user_id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL DEFAULT 'none',
+		model TEXT NOT NULL DEFAULT 'none'
+	);`
+	if _, err := s.db.Exec(userPrefsQuery); err != nil {
 		return err
+	}
+
+	// Add provider and model columns to user_preferences if they don't exist
+	alterProviderQuery := `ALTER TABLE user_preferences ADD COLUMN provider TEXT NOT NULL DEFAULT 'none'`
+	if _, err := s.db.Exec(alterProviderQuery); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			// Continue anyway - table might not exist yet
+		}
+	}
+
+	alterModelQuery := `ALTER TABLE user_preferences ADD COLUMN model TEXT NOT NULL DEFAULT 'none'`
+	if _, err := s.db.Exec(alterModelQuery); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			// Continue anyway
+		}
 	}
 
 	return nil
@@ -63,9 +89,9 @@ func (s *DBService) AddMessage(userID, userName, role, content string) error {
 	return err
 }
 
-func (s *DBService) GetMessages(userID string) ([]Message, error) {
-	query := `SELECT user_name, role, content, timestamp FROM messages WHERE user_id = ? ORDER BY timestamp ASC`
-	rows, err := s.db.Query(query, userID)
+func (s *DBService) GetMessages() ([]Message, error) {
+	query := `SELECT user_name, role, content, timestamp FROM messages ORDER BY timestamp ASC`
+	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -84,31 +110,28 @@ func (s *DBService) GetMessages(userID string) ([]Message, error) {
 	return messages, nil
 }
 
-func (s *DBService) TrimHistory(userID string, keepCount int) error {
-	var timestamp time.Time
-	query := `
-        SELECT timestamp FROM messages 
-        WHERE user_id = ? 
-        ORDER BY timestamp DESC 
-        LIMIT 1 OFFSET ?`
-
-	err := s.db.QueryRow(query, userID, keepCount-1).Scan(&timestamp)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return fmt.Errorf("could not get trim timestamp: %w", err)
-	}
-
-	deleteQuery := `DELETE FROM messages WHERE user_id = ? AND timestamp < ?`
-	_, err = s.db.Exec(deleteQuery, userID, timestamp)
-	if err != nil {
-		return fmt.Errorf("could not delete old messages: %w", err)
-	}
-
-	return nil
-}
-
 func (s *DBService) Close() {
 	s.db.Close()
+}
+
+func (s *DBService) ClearHistory() error {
+	query := `DELETE FROM messages`
+	_, err := s.db.Exec(query)
+	return err
+}
+
+func (s *DBService) SetUserPreference(userID, provider, model string) error {
+	query := `INSERT INTO user_preferences (user_id, provider, model) VALUES (?, ?, ?)
+	         ON CONFLICT(user_id) DO UPDATE SET provider = ?, model = ?`
+	_, err := s.db.Exec(query, userID, provider, model, provider, model)
+	return err
+}
+
+func (s *DBService) GetUserPreference(userID string) (provider, model string, err error) {
+	query := `SELECT provider, model FROM user_preferences WHERE user_id = ?`
+	err = s.db.QueryRow(query, userID).Scan(&provider, &model)
+	if err == sql.ErrNoRows {
+		return "none", "none", nil
+	}
+	return provider, model, err
 }

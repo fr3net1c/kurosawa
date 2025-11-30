@@ -4,9 +4,11 @@ import (
 	"context"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/api/cmdroute"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
@@ -16,7 +18,7 @@ import (
 
 var (
 	mlService *MLService
-	dbService *DBService
+	dbManager *DatabaseManager
 	channelID discord.ChannelID
 )
 
@@ -35,11 +37,6 @@ func main() {
 		log.Fatal("No DISCORD_TOKEN provided in .env file")
 	}
 
-	aiToken := os.Getenv("AI_TOKEN")
-	if aiToken == "" {
-		log.Fatal("No AI_TOKEN provided in .env file")
-	}
-
 	channelIDStr := os.Getenv("CHANNEL_ID")
 	if channelIDStr == "" {
 		log.Fatal("No CHANNEL_ID provided in .env file")
@@ -52,13 +49,18 @@ func main() {
 
 	channelID = discord.ChannelID(channelIDInt)
 
-	dbService, err = NewDB("kurosawa.db")
+	dbManager, err = NewDatabaseManager("user_data")
 	if err != nil {
-		log.Fatal("Cannot initialize database:", err)
+		log.Fatal("Cannot initialize database manager:", err)
 	}
-	defer dbService.Close()
+	defer dbManager.CloseAll()
 
-	mlService, err = NewMLService(aiToken, dbService)
+	providerFactory, err := NewProviderFactory()
+	if err != nil {
+		log.Fatal("Cannot initialize provider factory:", err)
+	}
+
+	mlService, err = NewMLService(dbManager, providerFactory.GetProviders())
 	if err != nil {
 		log.Fatal("Cannot initialize ML service:", err)
 	}
@@ -71,13 +73,24 @@ func main() {
 			return
 		}
 
-		if m.ChannelID == channelID && strings.HasPrefix(m.Content, "!m ") {
-			handleAIMessage(bot, m)
+		ch, err := bot.Channel(m.ChannelID)
+		if err != nil {
+			log.Printf("Error getting channel: %v", err)
+			return
+		}
+
+		//nolint:SA4006
+		isAIChannel := strings.HasPrefix(ch.Name, "ai-")
+
+		if isAIChannel || (m.ChannelID == channelID && strings.HasPrefix(m.Content, "!m ")) {
+			handleAIMessage(bot, m, isAIChannel)
 		}
 	})
 
+	bot.AddInteractionHandler(&InteractionHandler{bot: bot})
+
 	router := cmdroute.NewRouter()
-	RegisterCommands(router, bot)
+	RegisterCommands(router, bot, dbManager)
 	bot.AddInteractionHandler(router)
 
 	if err := bot.Open(context.Background()); err != nil {
@@ -97,6 +110,10 @@ func main() {
 
 	guildID := discord.GuildID(guildIDInt)
 
+	if err := initTicketSystem(); err != nil {
+		log.Fatal("Cannot initialize ticket system:", err)
+	}
+
 	if err := RegisterSlashCommands(bot, guildID); err != nil {
 		log.Fatal("Cannot register slash commands:", err)
 	}
@@ -108,12 +125,46 @@ func main() {
 	select {}
 }
 
-func handleAIMessage(bot *state.State, m *gateway.MessageCreateEvent) {
-	message := strings.TrimPrefix(m.Content, "!m ")
+type InteractionHandler struct {
+	bot *state.State
+}
+
+func (h *InteractionHandler) HandleInteraction(e *discord.InteractionEvent) *api.InteractionResponse {
+	switch data := e.Data.(type) {
+	case *discord.ButtonInteraction:
+		switch data.CustomID {
+		case "create_ticket":
+			createTicketChannel(h.bot, e)
+		case "close_ticket":
+			closeTicketChannel(h.bot, e)
+		}
+	}
+	return nil
+}
+
+func handleAIMessage(bot *state.State, m *gateway.MessageCreateEvent, isPrivate bool) {
+	var message string
+	if isPrivate {
+		message = m.Content
+	} else {
+		message = strings.TrimPrefix(m.Content, "!m ")
+	}
 	message = strings.TrimSpace(message)
 
 	if message == "" {
 		return
+	}
+
+	urls := findURLs(message)
+	if len(urls) > 0 {
+		for _, url := range urls {
+			content, err := GetContentFromURL(url)
+			if err != nil {
+				log.Printf("Error getting content from URL: %v", err)
+				continue
+			}
+			message = content + "\n" + message
+		}
 	}
 
 	userName := m.Author.Username
@@ -132,6 +183,11 @@ func handleAIMessage(bot *state.State, m *gateway.MessageCreateEvent) {
 	if err != nil {
 		log.Printf("Error sending message: %v", err)
 	}
+}
+
+func findURLs(text string) []string {
+	r := regexp.MustCompile(`\bhttps?://\S+\b`)
+	return r.FindAllString(text, -1)
 }
 
 func sendLongMessage(bot *state.State, channelID discord.ChannelID, message string) error {
