@@ -18,7 +18,6 @@ type MistralProvider struct {
 type MistralRequest struct {
 	Model    string                 `json:"model"`
 	Messages []MistralMessage       `json:"messages"`
-	SafeMode bool                   `json:"safe_mode"`
 	Extra    map[string]interface{} `json:"extra,omitempty"`
 }
 
@@ -68,7 +67,6 @@ func (m *MistralProvider) GetResponse(ctx context.Context, prompt string) (strin
 				Content: prompt,
 			},
 		},
-		SafeMode: false,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
